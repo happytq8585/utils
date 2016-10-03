@@ -27,8 +27,10 @@ static int default_read(int fd)
                 printf("\n");
                 return 0;
             }
-            printf("\n");
             return -1;
+        }
+        if (ret == 0) {
+            return 0;
         }
         buf[ret] = 0;
         printf("%s\n",  buf);
@@ -71,9 +73,8 @@ static fd_ctx_t* create_ctx(int fd, int who)
     {
         p->fops = &client_op;
     }
-    p->ev.events = 0;
     p->handle = handle;
-    p->ev.data.ptr = p;
+    p->ptr = p;
 }
 
 static int accept_read(int sd)
@@ -91,8 +92,10 @@ static int accept_read(int sd)
     if (ctx == NULL) {
         goto err1;
     }
-    ctx->ev.events = EPOLLET | EPOLLIN;
-    ret = epoll_ctl(netmodel.epfd, EPOLL_CTL_ADD, fd, &ctx->ev);
+    ctx->iev = EPOLLET | EPOLLIN | EPOLLRDHUP | EPOLLPRI;
+    ctx->oev = 0;
+    struct epoll_event ev = {ctx->iev, ctx};
+    ret = epoll_ctl(netmodel.epfd, EPOLL_CTL_ADD, fd, &ev);
     if (ret < 0) {
         close(fd);
         free(ctx);
@@ -130,9 +133,15 @@ static void handle(void* arg, int sd)
     fd_ctx_t *ctx = arg;
     int fd = ctx->fd;
     int epfd = netmodel.epfd;
-    uint32_t events = ctx->ev.events;
+    uint32_t events = ctx->oev;
     if (events & (EPOLLERR | EPOLLHUP)) {
         goto err;
+    }
+    if (events & EPOLLRDHUP) {
+        goto err;
+    }
+    if (events & EPOLLPRI) {
+        //TODO
     }
     if ((events & EPOLLIN) && ctx->fops->rd_op) {
         ret = ctx->fops->rd_op(fd);
@@ -140,8 +149,9 @@ static void handle(void* arg, int sd)
             goto err;
         }
         if (ctx->fops->wr_op) {
-            ctx->ev.events |= EPOLLOUT;
-            ret = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ctx->ev);
+            ctx->iev |= EPOLLOUT;
+            struct epoll_event ev = {ctx->iev, ctx};
+            ret = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
             if (ret < 0) {
                 goto err;
             }
@@ -152,8 +162,9 @@ static void handle(void* arg, int sd)
         if (ret < 0) {
             goto err;
         }
-        ctx->ev.events &= ~EPOLLOUT;
-        ret = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ctx->ev);
+        ctx->iev &= ~EPOLLOUT;
+        struct epoll_event ev = {ctx->iev, ctx};
+        ret = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
         if (ret < 0) {
             goto err;
         }
@@ -175,8 +186,9 @@ int start(int sd)
         return -1;
     }
     int epfd = netmodel.epfd;
-    accept_ctx->ev.events = EPOLLET | EPOLLIN;
-    int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &accept_ctx->ev);
+    accept_ctx->iev = EPOLLET | EPOLLIN | EPOLLRDHUP | EPOLLPRI;
+    struct epoll_event ev = {accept_ctx->iev, accept_ctx};
+    int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &ev);
     if (ret < 0) {
         close(accept_ctx->fd);
         free(accept_ctx);
@@ -189,6 +201,7 @@ int start(int sd)
         int i;
         for (i = 0; i < n; ++i) {
             fd_ctx_t* p = evs[i].data.ptr;
+            p->oev = evs[i].events;
             p->handle(p, sd);
         }
     }

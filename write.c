@@ -51,7 +51,6 @@ int main(int argc, char* argv[])
         ret = read(sd, rbuf, sizeof(rbuf));
         rbuf[ret] = 0;
         printf("ret=%d %s\n", ret, rbuf);
-        sleep(2);
     }
     return 0;
 }

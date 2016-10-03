@@ -46,7 +46,8 @@ typedef struct fd_ctx
 {
     int fd;  //a file descriptor
     struct fd_operations* fops;  //fd operations
-    struct epoll_event ev;       
+    uint32_t iev, oev;
+    void *ptr;
     void (*handle)(void* arg, int sd); //handle a fd
 } fd_ctx_t;
 
