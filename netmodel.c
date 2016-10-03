@@ -7,12 +7,122 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static int del_fd(int fd, fdparam_t*p);
-static int add_fd(int fd, uint32_t event, fdparam_t*p);
-static int mod_fd(int fd, uint32_t event, callback cb, fdparam_t* p);
+#include <util.h>
 
 static netmodel_t netmodel;
+static char *buf = "HTTP/1.1 200 OK\r\nContent-type:text/html\r\nContent-length:12\r\n\r\nHello World!";
+static void handle(void* arg, int sd);
+static int accept_read(int sd);
+static int default_read(int fd)
+{
+    char buf[2048] = {0};
+    int offset = 0;
+    while (1) {
+        int ret = read(fd, buf, sizeof(buf));
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN) {
+                printf("\n");
+                return 0;
+            }
+            printf("\n");
+            return -1;
+        }
+        buf[ret] = 0;
+        printf("%s\n",  buf);
+    }
+}
+static int default_write(int fd)
+{
+    int n = strlen(buf);
+    int offset = 0;
+    int ret;
+    while (offset < n) {
+        ret = write(fd, buf+offset, n-offset);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN) {
+                return 0;
+            }
+            return -1;
+        }
+        offset += ret;
+    }
+    return 0;
+}
 
+static int add_mod_del(fd_ctx_t *ctx, int how, uint32_t events)
+{
+    int epfd = netmodel.epfd;
+    if (how == DEL) {
+        return epoll_ctl(epfd, EPOLL_CTL_DEL, ctx->fd, &ctx->ev);
+    }
+    if (how == ADD) {
+        how = EPOLL_CTL_ADD;
+    } else if (how == MOD) {
+        how = EPOLL_CTL_MOD;
+    } else {
+        return -1;
+    }
+    ctx->ev.events = EPOLLET;
+    if (events & READ) {
+        ctx->ev.events |= EPOLLIN;
+    }
+    if (events & WRITE) {
+        ctx->ev.events |= EPOLLOUT;
+    }
+    return epoll_ctl(epfd, how, ctx->fd, &ctx->ev);
+}
+struct fd_operations accept_op = {.rd_op = accept_read};
+struct fd_operations client_op = {.rd_op = default_read, .wr_op = default_write};
+static fd_ctx_t* create_ctx(int fd, int who)
+{
+    fd_ctx_t * p = malloc(sizeof(fd_ctx_t));
+    if (p == NULL) {
+        return p;
+    }
+    p->fd = fd;
+    if (who == ACCEPT) {
+        p->fops = &accept_op;
+    }
+    else
+    {
+        p->fops = &client_op;
+    }
+    p->ev.events = EPOLLIN|EPOLLET;
+    p->handle = handle;
+    p->ev.data.ptr = p;
+}
+
+static int accept_read(int sd)
+{
+    int fd = accept(sd, NULL, NULL);
+    if (fd < 0) {
+        return -1;
+    }
+    int ret = setnonblock(fd);
+    if (ret < 0) {
+        printf("setnonblock() falield!\n");
+        goto err1;
+    }
+    fd_ctx_t *ctx = create_ctx(fd, CLIENT);
+    if (ctx == NULL) {
+        goto err1;
+    }
+    ret = add_mod_del(ctx, ADD, READ);
+    if (ret < 0) {
+        close(fd);
+        free(ctx);
+    }
+    return 0;
+err1:
+    close(fd);
+    return -1;
+}
 static init_model(int size)
 {
     int epfd = epoll_create(size);
@@ -35,124 +145,58 @@ err2:
     return -1;
 }
 
-static int client_write(fdparam_t *p)
+static void handle(void* arg, int sd)
 {
-    int fd = p->fd, ret;
-    char *buf = "HTTP/1.1 200 OK\r\nContent-type:text/html\r\nContent-length:12\r\nHello World!";
-    ret = write(fd, buf, strlen(buf));
-    del_fd(fd, p);
-    free(p);
+    int ret;
+    fd_ctx_t *ctx = arg;
+    int fd = ctx->fd;
+    int epfd = netmodel.epfd;
+    if (ctx->ev.events & (EPOLLERR | EPOLLHUP)) {
+        goto err;
+    }
+    if ((ctx->ev.events & EPOLLIN) && ctx->fops->rd_op) {
+        ret = ctx->fops->rd_op(fd);
+        if (ret < 0) {
+            goto err;
+        }
+        if (ctx->fops->wr_op) {
+            ctx->ev.events |= EPOLLOUT;
+            ret = add_mod_del(ctx, MOD, WRITE);
+            if (ret < 0) {
+                goto err;
+            }
+        }
+    }
+    if (ctx->ev.events & EPOLLOUT) {
+        ret = ctx->fops->wr_op(fd);
+        if (ret < 0) {
+            goto err;
+        }
+        ret = add_mod_del(ctx, MOD, WRITE);
+        if (ret < 0) {
+            goto err;
+        }
+    }
+    return;
+err:
     close(fd);
+    free(ctx);
 }
 
-static int client_read(fdparam_t *p)
-{
-    int fd = p->fd, ret;
-    char buf[1024];
-    while (1) {
-        ret = read(fd, buf, sizeof(buf));
-        if (ret < 0) {
-            if (errno != EAGAIN && errno != EINPROGRESS) {
-                close(fd);
-                return -1;
-            }
-            break;
-        }
-        write(1, buf, ret);
-    }
-    ret = mod_fd(fd, WRITE, client_write, p);
-    if (ret < 0) {
-        fprintf(stderr, "add_fd() failed!\n");
-        del_fd(fd, p);
-        close(fd);
-        return -1;
-    }
-    return 0;
-}
-static int del_fd(int fd, fdparam_t* p)
-{
-    int epfd = netmodel.epfd;
-    int ret = epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &p->ev);
-    if (ret < 0) {
-        perror("epoll_ctl()");
-        return -1;
-    }
-    free(p);
-    return 0;
-}
-static int mod_fd(int fd, uint32_t event, callback cb, fdparam_t* p)
-{
-    int epfd = netmodel.epfd;
-    p->ev.events  = 0;
-    p->cb = cb;
-    if (p->ev.events&READ) {
-        p->ev.events |= EPOLLIN;
-    }
-    if (p->ev.events&WRITE) {
-        p->ev.events |= EPOLLOUT;
-    }
-    int ret = epoll_ctl(epfd, EPOLL_CTL_MOD, p->fd, &p->ev);
-    if (ret < 0) {
-        perror("epoll_ctl()");
-        return -1;
-    }
-    return 0;
-}
-static int accept_cb(struct fdparam* p)
-{
-    int fd = accept(p->fd, NULL, NULL);
-    if (fd < 0) {
-        return -1;
-    }
-    int ret = setnonblock(fd);
-    if (ret < 0) {
-        close(fd);
-        return -1;
-    }
-    fdparam_t* ptr = malloc(sizeof(fdparam_t));
-    if (ptr == NULL) {
-        fprintf(stderr, "malloc() failed at %s\n", __func__);
-        return -1;
-    }
-    ptr->fd = fd;
-    ptr->cb = client_read;
-    ptr->ev.events = EPOLLIN;
-    ret = add_fd(fd, READ, ptr);
-    if (ret < 0) {
-        free(ptr);
-        return -1;
-    }
-    return 0;
-}
-static int add_fd(int fd, uint32_t event, fdparam_t* p)
-{
-    int epfd = netmodel.epfd;
-    p->fd = fd;
-    p->ev.data.ptr = p;
-    p->ev.events = 0;
-    if (event&READ) {
-        p->ev.events |= EPOLLIN;
-    }
-    if (event&WRITE) {
-        p->ev.events |= EPOLLOUT;
-    }
-    int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &p->ev);
-    if (ret < 0) {
-        perror("epoll_ctl()");
-        return -1;
-    }
-}
 //sd: socket fd
 int start(int sd)
 {
     if (init_model(4096) < 0) {
         return -1;
     }
-    fdparam_t sockparam;
-    sockparam.cb = accept_cb;
-    int ret = add_fd(sd, READ, &sockparam);
+    fd_ctx_t *accept_ctx = create_ctx(sd, ACCEPT);
+    if (accept_ctx == NULL) {
+        return -1;
+    }
+    int ret = add_mod_del(accept_ctx, ADD, READ);
     if (ret < 0) {
-        fprintf(stderr, "add_accept() failed\n");
+        close(accept_ctx->fd);
+        free(accept_ctx);
         return -1;
     }
     int epfd = netmodel.epfd;
@@ -162,8 +206,8 @@ int start(int sd)
         int n = epoll_wait(epfd, evs, evs_n, 500);
         int i;
         for (i = 0; i < n; ++i) {
-            fdparam_t* p = evs[i].data.ptr;
-            p->cb(p);
+            fd_ctx_t* p = evs[i].data.ptr;
+            p->handle(p, sd);
         }
     }
 }

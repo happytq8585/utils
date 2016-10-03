@@ -9,21 +9,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include <util.h>
 #include <netmodel.h>
-
-int setnonblock(int fd)
-{
-    int ret;
-    ret = fcntl(fd, F_GETFL);
-    if (ret < 0) {
-        return -1;
-    }
-    ret = fcntl(fd, F_SETFL, ret|O_NONBLOCK);
-    if (ret < 0) {
-        return -1;
-    }
-    return 0;
-}
 
 static int init(int argc, char* argv[], struct sockaddr_in* addr)
 {
@@ -77,5 +64,6 @@ int main(int argc, char* argv[])
     if (ret < 0) {
         return -1;
     }
-    start(sd);
+    ret = start(sd);
+    return 0;
 }
