@@ -55,28 +55,6 @@ static int default_write(int fd)
     return 0;
 }
 
-static int add_mod_del(fd_ctx_t *ctx, int how, uint32_t events)
-{
-    int epfd = netmodel.epfd;
-    if (how == DEL) {
-        return epoll_ctl(epfd, EPOLL_CTL_DEL, ctx->fd, &ctx->ev);
-    }
-    if (how == ADD) {
-        how = EPOLL_CTL_ADD;
-    } else if (how == MOD) {
-        how = EPOLL_CTL_MOD;
-    } else {
-        return -1;
-    }
-    ctx->ev.events = EPOLLET;
-    if (events & READ) {
-        ctx->ev.events |= EPOLLIN;
-    }
-    if (events & WRITE) {
-        ctx->ev.events |= EPOLLOUT;
-    }
-    return epoll_ctl(epfd, how, ctx->fd, &ctx->ev);
-}
 struct fd_operations accept_op = {.rd_op = accept_read};
 struct fd_operations client_op = {.rd_op = default_read, .wr_op = default_write};
 static fd_ctx_t* create_ctx(int fd, int who)
@@ -93,7 +71,7 @@ static fd_ctx_t* create_ctx(int fd, int who)
     {
         p->fops = &client_op;
     }
-    p->ev.events = EPOLLIN|EPOLLET;
+    p->ev.events = 0;
     p->handle = handle;
     p->ev.data.ptr = p;
 }
@@ -113,7 +91,8 @@ static int accept_read(int sd)
     if (ctx == NULL) {
         goto err1;
     }
-    ret = add_mod_del(ctx, ADD, READ);
+    ctx->ev.events = EPOLLET | EPOLLIN;
+    ret = epoll_ctl(netmodel.epfd, EPOLL_CTL_ADD, fd, &ctx->ev);
     if (ret < 0) {
         close(fd);
         free(ctx);
@@ -151,28 +130,30 @@ static void handle(void* arg, int sd)
     fd_ctx_t *ctx = arg;
     int fd = ctx->fd;
     int epfd = netmodel.epfd;
-    if (ctx->ev.events & (EPOLLERR | EPOLLHUP)) {
+    uint32_t events = ctx->ev.events;
+    if (events & (EPOLLERR | EPOLLHUP)) {
         goto err;
     }
-    if ((ctx->ev.events & EPOLLIN) && ctx->fops->rd_op) {
+    if ((events & EPOLLIN) && ctx->fops->rd_op) {
         ret = ctx->fops->rd_op(fd);
         if (ret < 0) {
             goto err;
         }
         if (ctx->fops->wr_op) {
             ctx->ev.events |= EPOLLOUT;
-            ret = add_mod_del(ctx, MOD, WRITE);
+            ret = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ctx->ev);
             if (ret < 0) {
                 goto err;
             }
         }
     }
-    if (ctx->ev.events & EPOLLOUT) {
+    if ((events & EPOLLOUT) && ctx->fops->wr_op) {
         ret = ctx->fops->wr_op(fd);
         if (ret < 0) {
             goto err;
         }
-        ret = add_mod_del(ctx, MOD, WRITE);
+        ctx->ev.events &= ~EPOLLOUT;
+        ret = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ctx->ev);
         if (ret < 0) {
             goto err;
         }
@@ -193,13 +174,14 @@ int start(int sd)
     if (accept_ctx == NULL) {
         return -1;
     }
-    int ret = add_mod_del(accept_ctx, ADD, READ);
+    int epfd = netmodel.epfd;
+    accept_ctx->ev.events = EPOLLET | EPOLLIN;
+    int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, sd, &accept_ctx->ev);
     if (ret < 0) {
         close(accept_ctx->fd);
         free(accept_ctx);
         return -1;
     }
-    int epfd = netmodel.epfd;
     struct epoll_event *evs = netmodel.evs;
     int evs_n = netmodel.evs_n;
     while (1) {
