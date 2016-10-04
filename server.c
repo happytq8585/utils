@@ -56,6 +56,42 @@ static int init(int argc, char* argv[], struct sockaddr_in* addr)
     return sd;
 }
 
+int myread(int fd)
+{
+    char buf[1024];
+    int ret, n=0;
+    while (1) {
+        ret = read(fd, buf, sizeof(buf));
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (ret == 0) {
+            break;
+        }
+        buf[ret] = 0;
+        printf("%s\n", buf);
+    }
+    return 0;
+}
+int mywrite(int fd)
+{
+    char buf[1024] = "good good study, day day up!";
+    int ret, offset=0, n = strlen(buf);
+    while (offset < n) {
+        ret = write(fd, buf+offset, n-offset);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        offset += ret;
+    }
+    return n;
+}
 int main(int argc, char* argv[])
 {
     int ret, sd;
@@ -64,6 +100,8 @@ int main(int argc, char* argv[])
     if (ret < 0) {
         return -1;
     }
+    ret = regist(READ, myread);
+    ret = regist(WRITE, mywrite);
     ret = start(sd);
     return 0;
 }

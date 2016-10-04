@@ -6,10 +6,17 @@
 
 #define READ          1
 #define WRITE         2
+#define ERR           3
+#define HUP           4
+#define PRI           5
 
 #define ADD           1
 #define MOD           2
 #define DEL           3
+
+#ifndef arrlen
+#define arrlen(a)     ((int)(sizeof(a)/sizeof(a[0])))
+#endif
 
 #include <sys/epoll.h>
 #include <unistd.h>
@@ -35,7 +42,7 @@ struct fd_operations
     fd_op     rd_op;   //when fd becomes read already
     fd_op     wr_op;   //when fd becomes write already
     fd_op     err_op;  //when fd becomes error
-    fd_op     hub_op;  //when fd becomes hangup
+    fd_op     hup_op;  //when fd becomes hangup
     fd_op     pri_op;  //when fd has priority data 
 };
 
@@ -48,8 +55,10 @@ typedef struct fd_ctx
     struct fd_operations* fops;  //fd operations
     uint32_t iev, oev;
     void *ptr;
-    void (*handle)(void* arg, int sd); //handle a fd
+    void (*handle)(void* arg); //handle a fd
 } fd_ctx_t;
 
+//how=READ read   how=WRITE write
+int regist(int how, fd_op callback);
 int start(int fd);
 #endif
